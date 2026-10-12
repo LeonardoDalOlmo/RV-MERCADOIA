@@ -1,0 +1,2 @@
+# partes do zip do projeto Xcode: binário, sem conversão de fim de linha
+xcode/*.part* binary

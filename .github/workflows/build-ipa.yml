@@ -1,0 +1,75 @@
+# Compila no macOS do GitHub o projeto Xcode gerado pela Unity no Windows e entrega um .ipa sem assinatura.
+# A assinatura (com o seu Apple ID) e a instalação no iPhone são feitas no Windows pelo Sideloadly.
+#
+# Roda sozinho a cada push que muda a pasta xcode/ (ou manualmente em Actions ▸ "Build iOS (.ipa)" ▸ Run workflow).
+# O .ipa fica em Actions ▸ execução ▸ Artifacts ▸ MercadoAR-ipa.
+name: Build iOS (.ipa)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "xcode/**"
+      - ".github/workflows/build-ipa.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - name: Baixar o repositório
+        uses: actions/checkout@v4
+
+      - name: Montar e descompactar o projeto Xcode
+        run: |
+          # o zip foi dividido em partes de 90 MB porque o GitHub recusa arquivos acima de 100 MB
+          cat xcode/MercadoAR-iOS.zip.part* > MercadoAR-iOS.zip
+          shasum -a 256 -c xcode/MercadoAR-iOS.zip.sha256
+          unzip -q MercadoAR-iOS.zip
+          ls MercadoAR-iOS
+
+      - name: Ajustar o projeto gerado no Windows
+        working-directory: MercadoAR-iOS
+        run: |
+          # o script do IL2CPP aponta para o usymtool.exe do Windows; troca pelo binário de macOS que vem no projeto
+          if [ "$(uname -m)" = "arm64" ]; then USYM=usymtoolarm64; else USYM=usymtool; fi
+          python3 - "$USYM" <<'EOF'
+          import re, sys
+          path = "Unity-iPhone.xcodeproj/project.pbxproj"
+          text = open(path, encoding="utf-8").read()
+          text, count = re.subn(r'--usymtool-path=\\"[^"]*?usymtool\.exe\\"',
+                                r'--usymtool-path=\\"$PROJECT_DIR/' + sys.argv[1] + r'\\"', text)
+          open(path, "w", encoding="utf-8").write(text)
+          print("usymtool-path ajustado:", count)
+          EOF
+          chmod +x *.sh usymtool usymtoolarm64
+          find Il2CppOutputProject/IL2CPP/build -type f ! -name "*.*" -exec chmod +x {} +
+          xcodebuild -version
+
+      - name: Compilar (sem assinatura)
+        working-directory: MercadoAR-iOS
+        run: |
+          xcodebuild -project Unity-iPhone.xcodeproj -scheme Unity-iPhone -configuration Release \
+            -sdk iphoneos -destination "generic/platform=iOS" -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            -quiet build
+
+      - name: Empacotar o .ipa
+        run: |
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name "*.app" | head -n 1)
+          echo "App: $APP"
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry MercadoAR.ipa Payload
+          ls -lh MercadoAR.ipa
+
+      - name: Publicar o .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: MercadoAR-ipa
+          path: MercadoAR.ipa
+          retention-days: 30
